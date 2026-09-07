@@ -1,0 +1,50 @@
+name: PS5 Pro stock check
+
+on:
+  schedule:
+    # Every 5 minutes. GitHub can skip runs under heavy load — real cadence is
+    # more like every 5-15 min. Increase if you hit rate limits.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  # Never let two checks race on committing state.
+  group: ps5pro-stock-check
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # needed to commit the state file back to the repo
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check stock and maybe email
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO:   ${{ secrets.MAIL_TO }}
+        run: python check.py
+
+      - name: Commit updated state
+        run: |
+          if [[ -n "$(git status --porcelain .state)" ]]; then
+            git config user.name  "ps5pro-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add .state
+            git commit -m "state: $(date -u +%FT%TZ) [skip ci]"
+            # Retry a couple of times if a parallel run pushed just before us.
+            for i in 1 2 3; do
+              git pull --rebase origin "${GITHUB_REF_NAME}" && git push && break
+              sleep 3
+            done
+          else
+            echo "no state change"
+          fi
