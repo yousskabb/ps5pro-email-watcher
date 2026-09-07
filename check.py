@@ -49,6 +49,14 @@ def fetch_html(url: str) -> str:
 
 def parse_stock(html: str) -> tuple[str, str]:
     """Return (status, note). status ∈ {in_stock, out_of_stock, unknown}."""
+    # Akamai / Cloudflare / queue walls typically return small HTML with a
+    # give-away phrase and no product markup at all.
+    if len(html) < 8000 and re.search(
+        r"Access Denied|You don't have permission|Reference #|"
+        r"Just a moment|Queue-it|waiting room|captcha",
+        html, flags=re.I,
+    ):
+        return "unknown", "page bloquée (anti-bot / queue) — GitHub IP filtrée ?"
     code = re.escape(PRODUCT_CODE)
     buttons = re.findall(
         rf'<button\b[^>]*data-product-code="{code}"[^>]*>',
@@ -148,7 +156,7 @@ def main() -> int:
 
     should_email = False
     reason = ""
-    
+
     if status == "in_stock":
         if prev_status != "in_stock":
             should_email = True
@@ -156,14 +164,26 @@ def main() -> int:
         elif now - prev_notified_at >= KEEPALIVE_SECONDS:
             should_email = True
             reason = f"toujours en stock ({(now - prev_notified_at)//60} min)"
+    elif status == "unknown":
+        # Canary: page structure changed OR PS Direct is serving a challenge /
+        # queue-it page. Alert once, then not more than once every 6h to avoid
+        # spam if the site stays broken.
+        CANARY_COOLDOWN = 6 * 3600
+        prev_canary_at = int(prev.get("last_canary_at") or 0)
+        if now - prev_canary_at >= CANARY_COOLDOWN:
+            should_email = True
+            reason = f"CANARY : détection cassée ({note}) — vérifie manuellement la page PS Direct"
 
     new_state = {
         "status": status,
         "note": note,
         "last_check_at": now,
         "last_notified_at": prev_notified_at,
+        "last_canary_at": int(prev.get("last_canary_at") or 0),
         "url": URL,
     }
+    if status == "unknown" and should_email:
+        new_state["last_canary_at"] = now
 
     if should_email:
         subject = "🎮 PS5 Pro EN STOCK sur PlayStation Direct FR"
