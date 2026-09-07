@@ -88,6 +88,30 @@ def save_state(state: dict) -> None:
     STATE_PATH.write_text(json.dumps(state, indent=2, ensure_ascii=False))
 
 
+def send_ntfy(subject: str, body: str) -> None:
+    """Push notification to the user's phone via ntfy.sh.
+
+    No-op if NTFY_TOPIC isn't set — email stays the primary channel.
+    """
+    topic = os.environ.get("NTFY_TOPIC")
+    if not topic:
+        return
+    req = urllib.request.Request(
+        f"https://ntfy.sh/{topic}",
+        data=body.encode("utf-8"),
+        headers={
+            "Title": subject,
+            "Priority": "urgent",     # sound + vibration, bypasses silent mode on iOS
+            "Tags": "video_game,rotating_light",
+            "Click": URL,             # tap the notif to open the product page
+            "Content-Type": "text/plain; charset=utf-8",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        r.read()
+
+
 def send_email(subject: str, body: str) -> None:
     user = os.environ["SMTP_USER"]
     password = os.environ["SMTP_PASS"]
@@ -151,13 +175,22 @@ def main() -> int:
             f"Prix affiché : 899,99 €\n\n"
             f"Fonce sur le lien. Sois connecté à ton compte PSN pour l'ajout au panier."
         )
+        sent_any = False
+        try:
+            send_ntfy(subject, body)
+            sent_any = True
+            print(f"ntfy sent: {reason}")
+        except Exception as e:
+            print(f"ntfy failed: {e}", file=sys.stderr)
         try:
             send_email(subject, body)
-            new_state["last_notified_at"] = now
+            sent_any = True
             print(f"email sent: {reason}")
         except Exception as e:
             print(f"email failed: {e}", file=sys.stderr)
-            # Save the observation anyway so we don't lose the transition.
+        if sent_any:
+            new_state["last_notified_at"] = now
+        # else: don't record notified_at so next run retries.
 
     save_state(new_state)
     return 0

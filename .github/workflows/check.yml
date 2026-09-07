@@ -28,9 +28,10 @@ jobs:
 
       - name: Check stock and maybe email
         env:
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          MAIL_TO:   ${{ secrets.MAIL_TO }}
+          SMTP_USER:  ${{ secrets.SMTP_USER }}
+          SMTP_PASS:  ${{ secrets.SMTP_PASS }}
+          MAIL_TO:    ${{ secrets.MAIL_TO }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python check.py
 
       - name: Commit updated state
