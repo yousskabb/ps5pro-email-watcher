@@ -124,8 +124,8 @@ def main() -> int:
 
     should_email = False
     reason = ""
-    if True:
-    #if status == "in_stock":
+    
+    if status == "in_stock":
         if prev_status != "in_stock":
             should_email = True
             reason = "transition rupture → EN STOCK"
