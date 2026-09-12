@@ -99,13 +99,56 @@ ligne d'origine et re-commit.
 
 ## Cadence réelle
 
-Le cron est `*/5 * * * *`, mais GitHub Actions bufferise les schedule triggers
-et peut sauter des runs (surtout au top de l'heure). En pratique tu auras un
-run **toutes les 5 à 15 min**. C'est plus que suffisant : les restocks PS
-Direct durent 20-60 min généralement.
+Le cron `*/5 * * * *` du workflow marche mal : GitHub Actions bufferise les
+schedule triggers et peut sauter des runs (souvent 15-30 min entre chaque en
+pratique). Pour garantir un vrai run toutes les 5 min, on utilise
+**cron-job.org** comme scheduler externe qui déclenche l'action via l'API
+GitHub (`workflow_dispatch`). GitHub honore `workflow_dispatch` immédiatement,
+donc la cadence devient fiable.
 
-Si tu veux plus rapide → passe à **cron-job.org** (gratuit, 1 min) qui appelle
-un `workflow_dispatch` via l'API GitHub. Dis-le-moi si tu veux le setup.
+### Setup cron-job.org (3 min)
+
+**1. Crée un PAT GitHub fine-grained** sur
+<https://github.com/settings/personal-access-tokens/new> :
+
+- Nom : `ps5pro-cron-dispatch`
+- Expiration : 1 an
+- Repository access : **Only select repositories** → `ps5pro-email-watcher`
+- Repository permissions → **Actions** → **Read and write**
+- Génère et copie le token (`github_pat_...`), il ne sera plus jamais affiché.
+
+**2. Crée le cronjob** sur <https://cron-job.org> :
+
+| Champ | Valeur |
+|---|---|
+| Titre | `PS5 Pro dispatch` |
+| URL | `https://api.github.com/repos/yousskabb/ps5pro-email-watcher/actions/workflows/check.yml/dispatches` |
+| Méthode | `POST` |
+| Schedule | Every 5 minutes (`*/5 * * * *`) |
+
+Request headers :
+
+```
+Accept: application/vnd.github+json
+Authorization: Bearer github_pat_XXXXXXXXXXXXXXXX
+X-GitHub-Api-Version: 2022-11-28
+Content-Type: application/json
+```
+
+Body :
+
+```json
+{"ref": "main"}
+```
+
+Active les notifications d'échec (email si le token expire ou si GitHub
+répond ≠ 204).
+
+**3. Test :** clique **Run now** → onglet Actions du repo → un run doit
+démarrer dans les 5 s. Réponse HTTP attendue : `204 No Content`.
+
+Le cron `schedule:` reste en place dans `check.yml` comme filet de sécurité :
+si cron-job.org tombe, GitHub prendra le relais (avec sa cadence pourrie).
 
 ## Ce que tu vas recevoir
 
