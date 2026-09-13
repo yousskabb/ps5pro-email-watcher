@@ -2,8 +2,9 @@ name: PS5 Pro stock check
 
 on:
   schedule:
-    # Every 5 minutes. GitHub can skip runs under heavy load — real cadence is
-    # more like every 5-15 min. Increase if you hit rate limits.
+    # Belt-and-braces only. GitHub can delay or skip scheduled runs by 5-30 min
+    # under load, which is why cron-job.org drives workflow_dispatch every 5 min
+    # as the real cadence. check.py guards against the two overlapping.
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
@@ -18,7 +19,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -26,12 +27,20 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check stock and maybe email
+      - name: Install fetch dependencies
+        # curl_cffi: TLS/HTTP2 browser impersonation, required by Fnac + Darty.
+        # requests: speaks HTTP/1.1, required by Carrefour and Cdiscount.
+        # Both are optional at runtime — a missing wheel degrades those
+        # retailers to `unknown` rather than taking the whole run down.
+        run: pip install --quiet --disable-pip-version-check curl_cffi requests
+
+      - name: Check stock and notify
         env:
           SMTP_USER:  ${{ secrets.SMTP_USER }}
           SMTP_PASS:  ${{ secrets.SMTP_PASS }}
           MAIL_TO:    ${{ secrets.MAIL_TO }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
         run: python check.py
 
       - name: Commit updated state

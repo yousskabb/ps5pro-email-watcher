@@ -1,205 +1,155 @@
-# PS5 Pro — email watcher (100 % gratuit)
+# PS5 Pro — multi-retailer stock watcher
 
-Un GitHub Action qui fetch la page PS5 Pro sur PlayStation Direct France toutes
-les 5 minutes et t'envoie un **email** dès que la console redevient en stock.
+Un GitHub Action qui surveille **14 fiches produit PS5 Pro** chez 11 enseignes
+françaises toutes les 5 minutes et t'alerte (ntfy + email) dès que l'une
+d'elles redevient achetable **chez le marchand lui-même** — jamais chez un
+revendeur marketplace.
 
-- Hébergement : **GitHub Actions** (gratuit et illimité sur un repo public,
-  2 000 min/mois sur un repo privé — largement de quoi tourner 24/7 à 5 min).
-- Envoi mail : **Gmail SMTP** avec un *App Password* (gratuit, jusqu'à 500
-  destinataires/jour, bien au-delà de nos besoins).
-- Anti-spam : un fichier `.state/status.json` commité dans le repo garde le
-  dernier statut. On envoie l'email uniquement sur la **transition
-  rupture → en stock** et un rappel horaire tant que ça reste dispo.
+Déclenché par **cron-job.org** qui tape `workflow_dispatch` toutes les 5 min
+(le `schedule:` de GitHub reste en filet de sécurité : il peut décaler de
+5 à 30 min sous charge).
 
-## Comment ça détecte
+## Pourquoi ce n'est pas juste « est-ce qu'il y a un bouton Acheter »
 
-Vérifié le 07/09/2025 sur `1000050720-FR` (Console PS5 Pro 2 To FR) :
+Sur les places de marché, **il y a toujours du stock** — chez un scalpeur.
+Relevé pendant la mise au point :
 
-```html
-<button data-en-label="Add to Cart"
-        class="btn transparent-orange-button add-to-cart js-analytics-tag hide"
-        data-product-code="1000050720-FR" ...>
+| Enseigne | Ce que la page annonce | Réalité |
+|---|---|---|
+| Auchan | `availability = InStock` | 2 215,40 € — vendu par 2KINGS |
+| Carrefour | 2 offres « InStock » | 2 650,55 € et 2 786,36 € |
+| Cdiscount | les 46 produits du flux disent `InStock` | 1 299 à 1 699 € |
+| Darty | offre marketplace active | 1 074,60 € pour une console à 499 € |
+
+D'où la règle : **l'identité du vendeur d'abord, le prix en second**. Le test
+Carrefour passe même avec le plafond relevé à 3 000 € — les scalpeurs sont
+rejetés parce qu'ils ne sont pas Carrefour, pas parce qu'ils sont chers.
+
+## Enseignes couvertes
+
+| Clé | Enseigne | Accès | Signal |
+|---|---|---|---|
+| `psdirect` | PlayStation Direct | API JSON publique | `stock.stockLevelStatus` |
+| `ldlc` | LDLC | aucun anti-bot | JSON-LD `availability` |
+| `materielnet` | Materiel.net | aucun anti-bot | idem (même SKU) |
+| `rueducommerce` | Rue du Commerce | aucun anti-bot | idem (même SKU) |
+| `boulanger` | Boulanger | Akamai (passe) | `data-analytics_product_*` |
+| `cultura` | Cultura | Cloudflare (passe) | `front_availability` + `product_offer_mkp` |
+| `auchan` | Auchan | aucun anti-bot | `data-stock` + `data-offer-type` |
+| `fnac` | Fnac | **curl_cffi firefox133** | CEDDL `availabilityType` |
+| `darty` | Darty | **curl_cffi firefox133** | metas TagCommander |
+| `cdiscount-*` | Cdiscount (3 SKU) | **challenge Baleen** | `data-e2e` + bloc vendeur |
+| `carrefour-*` | Carrefour (2 EAN) | **HTTP/1.1 obligatoire** | `window.__INITIAL_STATE__` |
+| `amazon_*` | Amazon.fr | `enabled=False` | voir plus bas |
+
+**Non couvertes, volontairement :** Micromania (Imperva, aucun contournement
+sans navigateur), Rakuten (marketplace pure), E.Leclerc (pas d'état de stock
+côté serveur), Intermarché / Système U (403).
+
+## Pièges découverts — ne les réintroduis pas
+
+- **Le JSON-LD de Fnac ment** : la PS5 Pro en rupture affiche
+  `LimitedAvailability`, jamais `OutOfStock`. Fnac utilise le JSON CEDDL.
+- **`availability` de Cdiscount ne veut rien dire** : `InStock` partout,
+  scalpeurs compris. Sert uniquement à lire le prix.
+- **`purchasable` de PS Direct est décoratif** : `true` alors que la console
+  est épuisée. On lit `stockLevelStatus` + `maxOrderQuantity`.
+- **`itemprop="availability"` d'Auchan est décoratif** aussi (`InStock` même
+  avec `data-stock="0"`).
+- **Cloudflare injecte `/cdn-cgi/challenge-platform/…/main.js` dans les pages
+  saines.** Ce n'est PAS un signal de blocage — seul `_cf_chl_opt` l'est.
+- **`akavpau_vpwaitingroom` chez Boulanger est présent en temps normal**
+  (config de consentement Didomi) — pas un signal de file d'attente.
+- **`unqualifiedBuyBox_feature_div` d'Amazon est présent sur les pages EN
+  STOCK** (manifeste de features) — ne teste son absence qu'ancré sur
+  `data-csa-c-asin`.
+- **Les classes CSS hachées** (`sc-bkkiih`, `f-xyz123`) changent à chaque
+  déploiement. On ne sélectionne que sur `data-*`, JSON embarqué, microdata.
+
+## Règle d'or
+
+> Une page bloquée / en challenge / illisible est **`unknown`**, jamais
+> `out_of_stock`.
+
+Sinon, au retour du site, on fabriquerait une fausse transition
+`out_of_stock → in_stock` : une alerte bidon à 3h du matin. `check.py` et tous
+les adaptateurs respectent ça, et c'est testé.
+
+## Architecture
+
+```
+check.py              orchestrateur : parcourt le registre, diffe l'état, alerte
+state.py              .state/status.json par enseigne (+ migration v1 → v2)
+notify.py             ntfy puis email, indépendants (l'un tombe, l'autre part)
+retailers/
+  base.py             le contrat : Retailer, Result, 4 stratégies de fetch, helpers
+  __init__.py         registre — un adaptateur cassé est ignoré, pas fatal
+  psdirect.py  ldlcgroup.py  boulanger.py  cultura.py  auchan.py
+  fnacdarty.py cdiscount.py  carrefour.py  amazon.py
 ```
 
-Quand la console est **indisponible**, chaque bouton `add-to-cart` porte la
-classe `hide`. Dès qu'elle redevient buyable, cette classe disparaît d'au
-moins un des boutons — c'est le signal qu'on lit. Vérification croisée avec
-la présence du texte « Actuellement Indisponible ».
+Chaque module expose `RETAILERS: list[Retailer]` et se teste seul :
+`python3 -m retailers.ldlcgroup` (hors-ligne sur HTML capturé + en direct).
 
-Testé localement contre le HTML réel : `out_of_stock` ✅. Sur une version où
-on retire `hide` : `in_stock` ✅.
+### Ajouter une enseigne
 
-## Setup en 6 minutes
+Écris `parse(html) -> Result`, ajoute un `Retailer(...)`, ajoute le nom du
+module à `ADAPTER_MODULES`. Trois lignes si le site expose un JSON-LD honnête.
 
-### 1. Crée un mot de passe d'application Gmail (2 min)
+### Désactiver une enseigne
 
-1. Va sur <https://myaccount.google.com/security>.
-2. Active **la validation en 2 étapes** si ce n'est pas déjà fait (obligatoire
-   pour créer un App Password).
-3. Va sur <https://myaccount.google.com/apppasswords>.
-4. Nom de l'app : `ps5pro-watcher`. Copie le mot de passe à 16 caractères
-   qui s'affiche (sans les espaces).
+`enabled=False` sur son `Retailer`. Rien à supprimer.
 
-### 2. Crée un repo GitHub (2 min)
+## Comportement des alertes
 
-1. Sur github.com → **New repository** → `ps5pro-email-watcher` → **public**
-   (public = minutes illimitées) → *Create*.
-2. Clone-le en local ou pousse ce dossier tel quel :
+- **Groupées** : si LDLC et Boulanger basculent au même run, une seule
+  notification listant les deux, avec un lien par enseigne.
+- **Rappel horaire** par enseigne tant que le stock tient.
+- **`queued`** (file d'attente Cultura / Boulanger) alerte aussi : sur ces
+  sites, l'ouverture de la file *est* le signal du drop.
+- **Canari** après 3 `unknown` d'affilée : « la détection est aveugle »,
+  non urgent, distinct d'une alerte stock. Cooldown 6 h.
+- **Quarantaine** après 18 h d'aveuglement : passage à un sondage toutes les
+  30 min pour ne pas taper un mur toutes les 5 minutes.
 
-```bash
-cd "/Users/youssefkabbaj/Documents/Extension PS5 Pro/ps5pro-email-watcher"
-git init
-git add .
-git commit -m "initial"
-git branch -M main
-git remote add origin git@github.com:TON_USER/ps5pro-email-watcher.git
-git push -u origin main
-```
+## Secrets GitHub
 
-### 3. Ajoute les 3 secrets (1 min)
-
-Sur ton repo GitHub → **Settings** → **Secrets and variables** → **Actions**
-→ **New repository secret** :
-
-| Nom | Valeur |
+| Secret | Rôle |
 |---|---|
-| `SMTP_USER` | ton adresse Gmail complète (`ex.@gmail.com`) |
-| `SMTP_PASS` | l'app password à 16 caractères de l'étape 1 |
-| `MAIL_TO`   | l'adresse où recevoir l'alerte (peut être la même) |
+| `NTFY_TOPIC` | topic ntfy (canal rapide) |
+| `NTFY_SERVER` | optionnel, serveur ntfy authentifié |
+| `SMTP_USER` / `SMTP_PASS` | Gmail + App Password |
+| `MAIL_TO` | destinataire (défaut : `SMTP_USER`) |
 
-### 4. Autorise l'action à commit (30 s)
+⚠️ **Un topic ntfy public est lisible ET inscriptible par n'importe qui.**
+Qui devine ton topic peut lire tes alertes ou t'envoyer un faux « EN STOCK ».
+Utilise un topic long et aléatoire, ou un serveur authentifié via
+`NTFY_SERVER`.
 
-**Settings** → **Actions** → **General** → tout en bas
-**Workflow permissions** → **Read and write permissions** → *Save*.
-(Nécessaire pour que le workflow puisse écrire `.state/status.json`.)
+## Réglages à connaître
 
-### 5. Lance un test (30 s)
+- **`retailers/carrefour.py` → `FIRST_PARTY_MODE`** (défaut `"delivery"`).
+  En `"any"`, les offres Drive comptent — mais le magasin dépend de l'IP du
+  runner GitHub, donc d'une ville au hasard. En `"delivery"`, seule la
+  livraison nationale déclenche une alerte.
+- **Amazon est `enabled=False`.** ~2 Mo par sondage, aucun endpoint léger,
+  blocage silencieux (HTTP 200 + corps vide), contraire aux CGU, et PA-API 5.0
+  est déprécié (403). Préfère une veille **Keepa gratuite** sur la série de
+  prix « Amazon », qui sépare déjà le premier vendeur des marketplaces.
+- **Fnac alterne deux templates PDP** (ancien ASP.NET / nouveau React) sur la
+  même URL, en A/B. L'adaptateur gère les deux.
 
-**Actions** → **PS5 Pro stock check** → **Run workflow** → *Run workflow*.
-Attends 30 s, ouvre le run : les logs doivent afficher
-`prev=None now='out_of_stock' note='actuellement indisponible'`.
-Pas d'email attendu (rupture actuellement — c'est normal).
+## Limites connues
 
-### 6. Force un email de test (facultatif, 30 s)
-
-Pour vérifier que Gmail marche, édite `check.py` temporairement et remplace :
-
-```python
-if status == "in_stock":
-```
-
-par :
-
-```python
-if True:  # DEBUG force email
-```
-
-commit, laisse tourner une fois, vérifie que le mail arrive → **remets** la
-ligne d'origine et re-commit.
-
-## Cadence réelle
-
-Le cron `*/5 * * * *` du workflow marche mal : GitHub Actions bufferise les
-schedule triggers et peut sauter des runs (souvent 15-30 min entre chaque en
-pratique). Pour garantir un vrai run toutes les 5 min, on utilise
-**cron-job.org** comme scheduler externe qui déclenche l'action via l'API
-GitHub (`workflow_dispatch`). GitHub honore `workflow_dispatch` immédiatement,
-donc la cadence devient fiable.
-
-### Setup cron-job.org (3 min)
-
-**1. Crée un PAT GitHub fine-grained** sur
-<https://github.com/settings/personal-access-tokens/new> :
-
-- Nom : `ps5pro-cron-dispatch`
-- Expiration : 1 an
-- Repository access : **Only select repositories** → `ps5pro-email-watcher`
-- Repository permissions → **Actions** → **Read and write**
-- Génère et copie le token (`github_pat_...`), il ne sera plus jamais affiché.
-
-**2. Crée le cronjob** sur <https://cron-job.org> :
-
-| Champ | Valeur |
-|---|---|
-| Titre | `PS5 Pro dispatch` |
-| URL | `https://api.github.com/repos/yousskabb/ps5pro-email-watcher/actions/workflows/check.yml/dispatches` |
-| Méthode | `POST` |
-| Schedule | Every 5 minutes (`*/5 * * * *`) |
-
-Request headers :
-
-```
-Accept: application/vnd.github+json
-Authorization: Bearer github_pat_XXXXXXXXXXXXXXXX
-X-GitHub-Api-Version: 2022-11-28
-Content-Type: application/json
-```
-
-Body :
-
-```json
-{"ref": "main"}
-```
-
-Active les notifications d'échec (email si le token expire ou si GitHub
-répond ≠ 204).
-
-**3. Test :** clique **Run now** → onglet Actions du repo → un run doit
-démarrer dans les 5 s. Réponse HTTP attendue : `204 No Content`.
-
-Le cron `schedule:` reste en place dans `check.yml` comme filet de sécurité :
-si cron-job.org tombe, GitHub prendra le relais (avec sa cadence pourrie).
-
-## Ce que tu vas recevoir
-
-Sujet : `🎮 PS5 Pro EN STOCK sur PlayStation Direct FR`
-
-Corps :
-
-```
-transition rupture → EN STOCK
-
-Console PlayStation®5 Pro - 2 To
-→ https://direct.playstation.com/fr-fr/buy-consoles/playstation5-pro-console-2-tb
-
-Signal détecté : bouton Ajouter au panier actif
-Prix affiché : 899,99 €
-
-Fonce sur le lien. Sois connecté à ton compte PSN pour l'ajout au panier.
-```
-
-Puis un rappel toutes les heures tant que le stock persiste (pour éviter de
-rater le mail si tu es AFK), rien tant que ça reste en rupture.
-
-## Fichiers
-
-| Fichier | Rôle |
-|---|---|
-| [`check.py`](check.py) | Fetch + parse + email + gestion d'état |
-| [`.github/workflows/check.yml`](.github/workflows/check.yml) | Cron 5 min + commit du state |
-| `.state/status.json` | Créé au 1er run — dernier statut vu |
-
-## Alternatives 100 % gratuites au mail
-
-Si tu préfères un canal plus rapide qu'un email, dans `check.py` remplace
-`send_email(...)` par un des ci-dessous — tous gratuits sans compte :
-
-- **Discord webhook** (~1 s) :
-  ```python
-  urllib.request.urlopen(urllib.request.Request(
-      os.environ["DISCORD_WEBHOOK"],
-      data=json.dumps({"content": subject + "\n" + URL}).encode(),
-      headers={"Content-Type": "application/json"},
-  ))
-  ```
-- **ntfy.sh** (push mobile, gratuit, appli iOS/Android) :
-  ```python
-  urllib.request.urlopen(urllib.request.Request(
-      "https://ntfy.sh/TON_TOPIC_UNIQUE",
-      data=(subject + "\n" + URL).encode(),
-      headers={"Title": "PS5 Pro", "Priority": "urgent", "Tags": "video_game"},
-  ))
-  ```
-- **Telegram bot** (via BotFather) : `curl` sur `api.telegram.org/bot<TOKEN>/sendMessage`.
-
-Dis-moi lequel tu veux, je te branche ça.
+- Les contournements (empreinte TLS Fnac/Darty, cookie Baleen Cdiscount,
+  HTTP/1.1 Carrefour) peuvent cesser de marcher **sans préavis**. Le canari
+  te préviendra ; il n'y a pas de correctif garanti.
+- Les IP GitHub Actions (Azure) sont notées plus sévèrement que les IP
+  résidentielles françaises. Si Fnac/Darty/Cdiscount/Carrefour se mettent à
+  renvoyer `unknown` en continu, la seule vraie parade est un runner
+  self-hosted sur une machine française (repo privé uniquement).
+- LDLC / Materiel.net / Rue du Commerce partagent le même SKU et
+  probablement le même stock : attends-toi à les voir basculer ensemble.
+- La branche `in_stock` de PS Direct et d'Amazon n'a jamais été validée sur
+  une vraie page en stock (aucune n'existait) — uniquement sur JSON synthétique
+  et sur un produit témoin d'un autre ASIN.
