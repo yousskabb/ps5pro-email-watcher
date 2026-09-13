@@ -3,7 +3,9 @@
 Fetch
 -----
 Behind Cloudflare (``cf-ray: ...-CDG``) but passing plain stdlib urllib today,
-so ``fetch_plain``. Search paths are brittle (``/search?q=`` 404s,
+mais UNIQUEMENT depuis une IP residentielle : depuis les IP Azure de
+GitHub Actions, urllib recoit un HTTP 403 (verifie en prod le 2026-09-13).
+On passe donc par ``fetch_impersonate`` (curl_cffi firefox133). Search paths are brittle (``/search?q=`` 404s,
 ``/catalogsearch/result/?q=`` 403-redirects), so the product URL is pinned.
 
 Detection (verified live 2026-09-13)
@@ -66,6 +68,7 @@ from .base import (
     Result,
     Retailer,
     availability_to_status,
+    fetch_impersonate,
     looks_blocked,
     parse_price,
     price_ok,
@@ -224,8 +227,10 @@ RETAILERS: list[Retailer] = [
         name="Cultura",
         url=URL,
         parse=parse,
+        fetch=fetch_impersonate,
         max_price=MAX_PRICE,
-        note="Cloudflare OK en clair ; waiting room Queue-it => statut queued (= le drop).",
+        note="Cloudflare : curl_cffi firefox133 obligatoire depuis un runner "
+             "(403 en clair sur IP Azure) ; waiting room Queue-it => queued (= le drop).",
     ),
 ]
 

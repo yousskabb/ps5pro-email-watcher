@@ -6,7 +6,11 @@ Carrefour's Cloudflare returns **HTTP/2 403** with ``cf-mitigated: challenge``
 to every client tried, *including* a full browser header set and a real TLS
 fingerprint — but **HTTP/1.1 200** with the complete product HTML,
 reproducibly. The discriminator is the protocol fingerprint, not the headers.
-Python ``requests`` speaks HTTP/1.1 by default, so ``base.fetch_http11`` is
+Forcer HTTP/1.1 suffit depuis une IP residentielle, mais PAS depuis les IP
+Azure de GitHub Actions : le 2026-09-13 en prod, les deux fiches ont recu un
+challenge Cloudflare. ``fetch_impersonate`` (curl_cffi firefox133) passe dans
+les deux cas -- l'empreinte TLS/HTTP2 compte autant que le protocole.
+L'ancienne note ``base.fetch_http11`` etait
 exactly the right tool and no impersonation library is needed. Captured proof:
 ``crf_*.hdr`` (HTTP/2 403 challenge) vs ``crf11_*.hdr`` (HTTP/1.1 200).
 
@@ -87,13 +91,13 @@ from typing import Callable, Optional
 try:                                    # package import (check.py)
     from .base import (
         DEFAULT_MAX_PRICE, STATUS_IN, STATUS_OUT, STATUS_UNKNOWN,
-        Result, Retailer, fetch_http11, iter_jsonld, looks_blocked,
+        Result, Retailer, fetch_impersonate, iter_jsonld, looks_blocked,
         parse_price, price_ok,
     )
 except ImportError:                     # direct `python3 retailers/carrefour.py`
     from base import (                  # type: ignore[no-redef]
         DEFAULT_MAX_PRICE, STATUS_IN, STATUS_OUT, STATUS_UNKNOWN,
-        Result, Retailer, fetch_http11, iter_jsonld, looks_blocked,
+        Result, Retailer, fetch_impersonate, iter_jsonld, looks_blocked,
         parse_price, price_ok,
     )
 
@@ -321,7 +325,7 @@ RETAILERS: list[Retailer] = [
         key="carrefour-ps5pro-2tb",
         name="Carrefour (PS5 Pro 2 To)",
         url="https://www.carrefour.fr/p/console-ps5-pro-2-tb-sony-0711719024040",
-        fetch=fetch_http11,
+        fetch=fetch_impersonate,
         parse=make_parser("0711719024040"),
         note="Cloudflare : HTTP/1.1 obligatoire (403 en HTTP/2). "
              "FIRST_PARTY_MODE=%s" % FIRST_PARTY_MODE,
@@ -330,7 +334,7 @@ RETAILERS: list[Retailer] = [
         key="carrefour-ps5pro",
         name="Carrefour (PS5 Pro)",
         url="https://www.carrefour.fr/p/console-ps5-pro-sony-0711719595472",
-        fetch=fetch_http11,
+        fetch=fetch_impersonate,
         parse=make_parser("0711719595472"),
         note="Cloudflare : HTTP/1.1 obligatoire (403 en HTTP/2). "
              "FIRST_PARTY_MODE=%s" % FIRST_PARTY_MODE,
@@ -378,7 +382,7 @@ if __name__ == "__main__":
         show("[%s] %s" % ("ok " if ok else "FAIL", label), res)
         return res
 
-    print("=== OFFLINE (HTML capturé 2026-09-13, HTTP/1.1) " + "=" * 30)
+    print("=== OFFLINE (HTML capturé 2026-09-13) " + "=" * 30)
     check("HTTP/1.1 2 To 0711719024040 [mode any]",
           "crf11_console-ps5-pro-2-tb-sony-0711719024040.html",
           "0711719024040", STATUS_IN, mode="any")
@@ -433,7 +437,7 @@ if __name__ == "__main__":
     print("=== LIVE (HTTP/1.1) " + "=" * 51)
     for r in RETAILERS:
         try:
-            res = r.parse(fetch_http11(r))
+            res = r.parse(fetch_impersonate(r))
         except Exception as exc:                     # noqa: BLE001
             res = Result(STATUS_UNKNOWN, "fetch KO: %s" % exc)
         show(r.key, res)
